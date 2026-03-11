@@ -1,0 +1,1285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Benioff vs McDermott: Death Match</title>
+  <style>
+    /* GEMINI: All CSS styling here - see handoff notes in docs/plans/ */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a1a;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      overflow: hidden;
+    }
+    #game-container {
+      position: relative;
+      width: 960px;
+      height: 640px;
+    }
+    #game-canvas {
+      background: #1a1a2e;
+      border: 2px solid #00ffff;
+      box-shadow: 0 0 20px #00ffff33;
+    }
+    /* GEMINI: Add menu screens, HUD, and neon effects here */
+  </style>
+</head>
+<body>
+  <!-- GEMINI: Menu HTML structures go here -->
+  <div id="game-container">
+    <canvas id="game-canvas" width="960" height="640"></canvas>
+  </div>
+
+  <script>
+    // ============================================================
+    // CLAUDE: Game Engine Code - DO NOT MODIFY without coordination
+    // ============================================================
+
+    // === CONFIG ===
+    const CONFIG = {
+      CANVAS_WIDTH: 960,
+      CANVAS_HEIGHT: 640,
+      FIXED_TIMESTEP: 1000 / 60, // 60fps
+      MAX_DELTA: 100, // Cap delta to prevent spiral of death
+
+      // Physics
+      FRICTION: 0.85,
+      GRAVITY: 0.3,
+
+      // Characters
+      CHARACTERS: {
+        benioff: {
+          name: 'Benioff',
+          speed: 4.5,
+          health: 100,
+          attack: 1.0,
+          color: '#4a90d9',
+          glowColor: '#00aaff'
+        },
+        mcdermott: {
+          name: 'McDermott',
+          speed: 3.8,
+          health: 120,
+          attack: 1.2,
+          color: '#ff6b35',
+          glowColor: '#ff8844'
+        }
+      },
+
+      // Weapons
+      WEAPONS: {
+        blaster: { damage: 10, speed: 12, cooldown: 200, color: '#00ffff' },
+        grenade: { damage: 35, speed: 8, cooldown: 1500, fuseTime: 2000, radius: 80 },
+        dash: { cooldown: 1000, distance: 150, invulnTime: 300 }
+      },
+
+      // Specials
+      SPECIALS: {
+        cloud_bolt: { damage: 25, cooldown: 3000, trackTime: 500 },
+        ohana_shield: { cooldown: 5000, duration: 2000 },
+        workflow_blast: { damage: 20, cooldown: 3000, range: 200, pushback: 8 },
+        automation_drone: { damage: 5, cooldown: 6000, duration: 5000, fireRate: 500 }
+      },
+
+      // Arena
+      ARENAS: {
+        cloud_city: { name: 'Cloud City', bgColor: '#1a0a2e', accentColor: '#ff00ff' },
+        data_center: { name: 'Data Center', bgColor: '#0a1a2e', accentColor: '#00ffff' },
+        boardroom: { name: 'Boardroom', bgColor: '#2e2a1a', accentColor: '#ffd700' }
+      },
+
+      // Game rules
+      ROUND_TIME: 60000, // 60 seconds
+      WINS_NEEDED: 2
+    };
+
+    // === GAME STATE ===
+    const GameState = {
+      MENU: 'menu',
+      CHARACTER_SELECT: 'character_select',
+      ARENA_SELECT: 'arena_select',
+      PLAYING: 'playing',
+      PAUSED: 'paused',
+      ROUND_END: 'round_end',
+      GAME_OVER: 'game_over'
+    };
+
+    // === VECTOR2 CLASS ===
+    class Vector2 {
+      constructor(x = 0, y = 0) {
+        this.x = x;
+        this.y = y;
+      }
+
+      add(v) { return new Vector2(this.x + v.x, this.y + v.y); }
+      subtract(v) { return new Vector2(this.x - v.x, this.y - v.y); }
+      multiply(scalar) { return new Vector2(this.x * scalar, this.y * scalar); }
+      divide(scalar) { return new Vector2(this.x / scalar, this.y / scalar); }
+
+      magnitude() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+
+      normalize() {
+        const mag = this.magnitude();
+        if (mag === 0) return new Vector2(0, 0);
+        return this.divide(mag);
+      }
+
+      dot(v) { return this.x * v.x + this.y * v.y; }
+
+      clone() { return new Vector2(this.x, this.y); }
+
+      static distance(a, b) {
+        return a.subtract(b).magnitude();
+      }
+
+      static lerp(a, b, t) {
+        return new Vector2(
+          a.x + (b.x - a.x) * t,
+          a.y + (b.y - a.y) * t
+        );
+      }
+    }
+
+    // === INPUT HANDLER ===
+    const CONTROLS = {
+      P1: {
+        up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD',
+        weapon1: 'Digit1', weapon2: 'Digit2', weapon3: 'Digit3',
+        special1: 'KeyQ', special2: 'KeyE'
+      },
+      P2: {
+        up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+        weapon1: 'Numpad7', weapon2: 'Numpad8', weapon3: 'Numpad9',
+        special1: 'Comma', special2: 'Period'
+      }
+    };
+
+    class InputHandler {
+      constructor() {
+        this.keys = {};
+        this.justPressed = {};
+        this.justReleased = {};
+
+        window.addEventListener('keydown', (e) => this.onKeyDown(e));
+        window.addEventListener('keyup', (e) => this.onKeyUp(e));
+      }
+
+      onKeyDown(e) {
+        if (!this.keys[e.code]) {
+          this.justPressed[e.code] = true;
+        }
+        this.keys[e.code] = true;
+
+        // Prevent default for game keys
+        const allKeys = Object.values(CONTROLS.P1).concat(Object.values(CONTROLS.P2));
+        if (allKeys.includes(e.code)) {
+          e.preventDefault();
+        }
+      }
+
+      onKeyUp(e) {
+        this.keys[e.code] = false;
+        this.justReleased[e.code] = true;
+      }
+
+      isPressed(key) { return !!this.keys[key]; }
+      isJustPressed(key) { return !!this.justPressed[key]; }
+      isJustReleased(key) { return !!this.justReleased[key]; }
+
+      clearFrame() {
+        this.justPressed = {};
+        this.justReleased = {};
+      }
+
+      getMovement(playerNum) {
+        const controls = playerNum === 1 ? CONTROLS.P1 : CONTROLS.P2;
+        let x = 0, y = 0;
+        if (this.isPressed(controls.up)) y -= 1;
+        if (this.isPressed(controls.down)) y += 1;
+        if (this.isPressed(controls.left)) x -= 1;
+        if (this.isPressed(controls.right)) x += 1;
+        return new Vector2(x, y).normalize();
+      }
+    }
+
+    // === AABB COLLISION ===
+    function AABB(a, b) {
+      return a.x < b.x + b.width &&
+             a.x + a.width > b.x &&
+             a.y < b.y + b.height &&
+             a.y + a.height > b.y;
+    }
+
+    // === ENTITY BASE CLASS ===
+    class Entity {
+      constructor(x, y, width, height) {
+        this.pos = new Vector2(x, y);
+        this.vel = new Vector2(0, 0);
+        this.acc = new Vector2(0, 0);
+        this.width = width;
+        this.height = height;
+        this.active = true;
+      }
+
+      update(dt) {
+        this.vel = this.vel.add(this.acc.multiply(dt / 16));
+        this.vel = this.vel.multiply(CONFIG.FRICTION);
+        this.pos = this.pos.add(this.vel);
+        this.acc = new Vector2(0, 0);
+      }
+
+      render(ctx) {
+        // Override in subclasses
+      }
+
+      collidesWith(other) {
+        return AABB(
+          { x: this.pos.x, y: this.pos.y, width: this.width, height: this.height },
+          { x: other.pos.x, y: other.pos.y, width: other.width, height: other.height }
+        );
+      }
+
+      getCenter() {
+        return new Vector2(
+          this.pos.x + this.width / 2,
+          this.pos.y + this.height / 2
+        );
+      }
+    }
+
+    // === PLAYER CLASS ===
+    class Player extends Entity {
+      constructor(character, playerNum, startX, startY) {
+        super(startX, startY, 40, 60);
+        this.character = character;
+        this.playerNum = playerNum;
+        this.stats = { ...CONFIG.CHARACTERS[character] };
+
+        this.health = this.stats.health;
+        this.maxHealth = this.stats.health;
+        this.facing = playerNum === 1 ? 1 : -1; // 1 = right, -1 = left
+
+        this.isInvulnerable = false;
+        this.invulnEndTime = 0;
+
+        this.isShielded = false;
+        this.shieldEndTime = 0;
+
+        // Cooldowns
+        this.weaponCooldowns = {
+          blaster: 0,
+          grenade: 0,
+          dash: 0
+        };
+        this.specialCooldowns = {
+          special1: 0,
+          special2: 0
+        };
+
+        this.isDashing = false;
+        this.dashEndTime = 0;
+        this.dashDirection = new Vector2(0, 0);
+
+        this.wins = 0;
+      }
+
+      update(dt, input, game) {
+        if (!this.active) return;
+
+        const now = performance.now();
+
+        // Update cooldowns
+        for (let key in this.weaponCooldowns) {
+          this.weaponCooldowns[key] = Math.max(0, this.weaponCooldowns[key] - dt);
+        }
+        for (let key in this.specialCooldowns) {
+          this.specialCooldowns[key] = Math.max(0, this.specialCooldowns[key] - dt);
+        }
+
+        // Update timed effects
+        if (this.isInvulnerable && now > this.invulnEndTime) {
+          this.isInvulnerable = false;
+        }
+        if (this.isShielded && now > this.shieldEndTime) {
+          this.isShielded = false;
+        }
+        if (this.isDashing && now > this.dashEndTime) {
+          this.isDashing = false;
+        }
+
+        // Movement (if not dashing)
+        if (!this.isDashing) {
+          const movement = input.getMovement(this.playerNum);
+          if (movement.magnitude() > 0) {
+            this.vel = movement.multiply(this.stats.speed);
+            this.facing = movement.x !== 0 ? Math.sign(movement.x) : this.facing;
+          }
+        }
+
+        super.update(dt);
+
+        // Boundary collision
+        this.pos.x = Math.max(0, Math.min(CONFIG.CANVAS_WIDTH - this.width, this.pos.x));
+        this.pos.y = Math.max(0, Math.min(CONFIG.CANVAS_HEIGHT - this.height, this.pos.y));
+      }
+
+      handleInput(input, game) {
+        const controls = this.playerNum === 1 ? CONTROLS.P1 : CONTROLS.P2;
+
+        // Weapons
+        if (input.isJustPressed(controls.weapon1)) this.fireBlaster(game);
+        if (input.isJustPressed(controls.weapon2)) this.throwGrenade(game);
+        if (input.isJustPressed(controls.weapon3)) this.dash(input, game);
+
+        // Specials
+        if (input.isJustPressed(controls.special1)) this.useSpecial1(game);
+        if (input.isJustPressed(controls.special2)) this.useSpecial2(game);
+      }
+
+      fireBlaster(game) {
+        if (this.weaponCooldowns.blaster > 0) return;
+        this.weaponCooldowns.blaster = CONFIG.WEAPONS.blaster.cooldown;
+
+        const dir = new Vector2(this.facing, 0);
+        game.addProjectile(new BlasterProjectile(
+          this.pos.x + this.width / 2,
+          this.pos.y + this.height / 2,
+          dir,
+          this
+        ));
+      }
+
+      throwGrenade(game) {
+        if (this.weaponCooldowns.grenade > 0) return;
+        this.weaponCooldowns.grenade = CONFIG.WEAPONS.grenade.cooldown;
+
+        const dir = new Vector2(this.facing, -0.5).normalize();
+        game.addProjectile(new GrenadeProjectile(
+          this.pos.x + this.width / 2,
+          this.pos.y + this.height / 2,
+          dir,
+          this
+        ));
+      }
+
+      dash(input, game) {
+        if (this.weaponCooldowns.dash > 0 || this.isDashing) return;
+        this.weaponCooldowns.dash = CONFIG.WEAPONS.dash.cooldown;
+
+        const movement = input.getMovement(this.playerNum);
+        this.dashDirection = movement.magnitude() > 0 ? movement : new Vector2(this.facing, 0);
+        this.vel = this.dashDirection.multiply(CONFIG.WEAPONS.dash.distance / 10);
+        this.isDashing = true;
+        this.isInvulnerable = true;
+        this.dashEndTime = performance.now() + CONFIG.WEAPONS.dash.invulnTime;
+        this.invulnEndTime = this.dashEndTime;
+      }
+
+      useSpecial1(game) {
+        if (this.specialCooldowns.special1 > 0) return;
+        this.specialCooldowns.special1 = 5000; // Base cooldown
+
+        if (this.character === 'benioff') {
+          this.fireCloudBolt(game);
+        } else {
+          this.fireWorkflowBlast(game);
+        }
+      }
+
+      useSpecial2(game) {
+        if (this.specialCooldowns.special2 > 0) return;
+        this.specialCooldowns.special2 = 5000;
+
+        if (this.character === 'benioff') {
+          this.activateShield();
+        } else {
+          this.spawnDrone(game);
+        }
+      }
+
+      // Benioff specials
+      fireCloudBolt(game) {
+        this.specialCooldowns.special1 = CONFIG.SPECIALS.cloud_bolt.cooldown;
+        const enemy = game.getOpponent(this);
+        const dir = enemy ?
+          enemy.getCenter().subtract(this.getCenter()).normalize() :
+          new Vector2(this.facing, 0);
+
+        game.addProjectile(new CloudBoltProjectile(
+          this.pos.x + this.width / 2,
+          this.pos.y,
+          dir,
+          this,
+          enemy
+        ));
+      }
+
+      activateShield() {
+        this.specialCooldowns.special2 = CONFIG.SPECIALS.ohana_shield.cooldown;
+        this.isShielded = true;
+        this.shieldEndTime = performance.now() + CONFIG.SPECIALS.ohana_shield.duration;
+      }
+
+      // McDermott specials
+      fireWorkflowBlast(game) {
+        this.specialCooldowns.special1 = CONFIG.SPECIALS.workflow_blast.cooldown;
+        const dir = new Vector2(this.facing, 0);
+
+        game.addProjectile(new WorkflowBlastProjectile(
+          this.pos.x + this.width / 2,
+          this.pos.y + this.height / 2,
+          dir,
+          this
+        ));
+      }
+
+      spawnDrone(game) {
+        this.specialCooldowns.special2 = CONFIG.SPECIALS.automation_drone.cooldown;
+        game.addEntity(new Drone(
+          this.pos.x + this.width / 2,
+          this.pos.y - 20,
+          this
+        ));
+      }
+
+      takeDamage(amount, knockback = new Vector2(0, 0)) {
+        if (this.isInvulnerable || this.isShielded) return false;
+
+        this.health -= amount;
+        this.vel = this.vel.add(knockback);
+
+        this.isInvulnerable = true;
+        this.invulnEndTime = performance.now() + 500;
+
+        if (this.health <= 0) {
+          this.health = 0;
+          this.active = false;
+        }
+        return true;
+      }
+
+      reset(x, y) {
+        this.pos = new Vector2(x, y);
+        this.vel = new Vector2(0, 0);
+        this.health = this.maxHealth;
+        this.active = true;
+        this.isInvulnerable = false;
+        this.isShielded = false;
+        this.isDashing = false;
+        this.facing = this.playerNum === 1 ? 1 : -1;
+        for (let key in this.weaponCooldowns) this.weaponCooldowns[key] = 0;
+        for (let key in this.specialCooldowns) this.specialCooldowns[key] = 0;
+      }
+
+      render(ctx) {
+        const stats = CONFIG.CHARACTERS[this.character];
+
+        // Glow effect
+        ctx.shadowBlur = this.isDashing ? 30 : 15;
+        ctx.shadowColor = stats.glowColor;
+
+        // Body
+        ctx.fillStyle = this.isInvulnerable && Math.floor(performance.now() / 50) % 2 ?
+          '#ffffff' : stats.color;
+        ctx.fillRect(this.pos.x, this.pos.y, this.width, this.height);
+
+        // Direction indicator
+        ctx.fillStyle = '#ffffff';
+        const eyeX = this.facing > 0 ? this.pos.x + this.width - 12 : this.pos.x + 4;
+        ctx.fillRect(eyeX, this.pos.y + 15, 8, 8);
+
+        // Shield effect
+        if (this.isShielded) {
+          ctx.strokeStyle = '#00ffff';
+          ctx.lineWidth = 3;
+          ctx.shadowColor = '#00ffff';
+          ctx.shadowBlur = 20;
+          ctx.beginPath();
+          ctx.arc(this.pos.x + this.width/2, this.pos.y + this.height/2, 40, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // === PROJECTILES ===
+    class Projectile extends Entity {
+      constructor(x, y, width, height, direction, owner) {
+        super(x - width/2, y - height/2, width, height);
+        this.direction = direction.normalize();
+        this.owner = owner;
+        this.damage = 10;
+        this.knockback = new Vector2(0, 0);
+      }
+
+      update(dt, game) {
+        super.update(dt);
+      }
+
+      onHit(target, game) {
+        const knockback = this.direction.multiply(this.knockback.magnitude() || 5);
+        if (target.takeDamage(this.damage, knockback)) {
+          this.active = false;
+        }
+      }
+    }
+
+    class BlasterProjectile extends Projectile {
+      constructor(x, y, direction, owner) {
+        super(x, y, 20, 8, direction, owner);
+        this.vel = direction.multiply(CONFIG.WEAPONS.blaster.speed);
+        this.damage = CONFIG.WEAPONS.blaster.damage * owner.stats.attack;
+        this.color = CONFIG.WEAPONS.blaster.color;
+      }
+
+      update(dt, game) {
+        this.pos = this.pos.add(this.vel);
+
+        // Out of bounds
+        if (this.pos.x < -50 || this.pos.x > CONFIG.CANVAS_WIDTH + 50 ||
+            this.pos.y < -50 || this.pos.y > CONFIG.CANVAS_HEIGHT + 50) {
+          this.active = false;
+        }
+      }
+
+      render(ctx) {
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = this.color;
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.pos.x, this.pos.y, this.width, this.height);
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    class GrenadeProjectile extends Projectile {
+      constructor(x, y, direction, owner) {
+        super(x, y, 16, 16, direction, owner);
+        this.vel = direction.multiply(CONFIG.WEAPONS.grenade.speed);
+        this.vel.y -= 5; // Arc upward
+        this.damage = CONFIG.WEAPONS.grenade.damage * owner.stats.attack;
+        this.fuseTime = CONFIG.WEAPONS.grenade.fuseTime;
+        this.spawnTime = performance.now();
+        this.exploded = false;
+        this.explosionRadius = CONFIG.WEAPONS.grenade.radius;
+      }
+
+      update(dt, game) {
+        this.vel.y += CONFIG.GRAVITY;
+        this.pos = this.pos.add(this.vel);
+
+        // Ground bounce
+        if (this.pos.y > CONFIG.CANVAS_HEIGHT - this.height) {
+          this.pos.y = CONFIG.CANVAS_HEIGHT - this.height;
+          this.vel.y *= -0.5;
+          this.vel.x *= 0.8;
+        }
+
+        // Wall bounce
+        if (this.pos.x < 0 || this.pos.x > CONFIG.CANVAS_WIDTH - this.width) {
+          this.vel.x *= -0.8;
+          this.pos.x = Math.max(0, Math.min(CONFIG.CANVAS_WIDTH - this.width, this.pos.x));
+        }
+
+        // Explode on fuse
+        if (performance.now() - this.spawnTime > this.fuseTime) {
+          this.explode(game);
+        }
+      }
+
+      explode(game) {
+        if (this.exploded) return;
+        this.exploded = true;
+        this.active = false;
+
+        // Damage nearby
+        const players = game.getPlayers();
+        for (let player of players) {
+          if (player === this.owner) continue;
+          const dist = Vector2.distance(this.getCenter(), player.getCenter());
+          if (dist < this.explosionRadius) {
+            const damageMult = 1 - (dist / this.explosionRadius);
+            const knockback = player.getCenter().subtract(this.getCenter()).normalize().multiply(15);
+            player.takeDamage(this.damage * damageMult, knockback);
+          }
+        }
+
+        game.addEffect(new ExplosionEffect(this.getCenter().x, this.getCenter().y, this.explosionRadius));
+      }
+
+      render(ctx) {
+        const pulse = 1 + Math.sin(performance.now() / 100) * 0.2;
+        ctx.shadowBlur = 20 * pulse;
+        ctx.shadowColor = '#ff6600';
+        ctx.fillStyle = '#ff4400';
+        ctx.beginPath();
+        ctx.arc(this.pos.x + this.width/2, this.pos.y + this.height/2, this.width/2 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    class CloudBoltProjectile extends Projectile {
+      constructor(x, y, direction, owner, target) {
+        super(x, y, 12, 30, direction, owner);
+        this.target = target;
+        this.damage = CONFIG.SPECIALS.cloud_bolt.damage * owner.stats.attack;
+        this.speed = 10;
+        this.trackTime = CONFIG.SPECIALS.cloud_bolt.trackTime;
+        this.spawnTime = performance.now();
+      }
+
+      update(dt, game) {
+        // Track target briefly
+        if (this.target && performance.now() - this.spawnTime < this.trackTime) {
+          const toTarget = this.target.getCenter().subtract(this.getCenter()).normalize();
+          this.direction = Vector2.lerp(this.direction, toTarget, 0.1).normalize();
+        }
+
+        this.vel = this.direction.multiply(this.speed);
+        this.pos = this.pos.add(this.vel);
+
+        if (this.pos.y < -50 || this.pos.y > CONFIG.CANVAS_HEIGHT + 50 ||
+            this.pos.x < -50 || this.pos.x > CONFIG.CANVAS_WIDTH + 50) {
+          this.active = false;
+        }
+      }
+
+      render(ctx) {
+        ctx.shadowBlur = 25;
+        ctx.shadowColor = '#aa88ff';
+        ctx.strokeStyle = '#ccbbff';
+        ctx.lineWidth = 4;
+
+        // Lightning zigzag
+        ctx.beginPath();
+        ctx.moveTo(this.pos.x + this.width/2, this.pos.y);
+        for (let i = 1; i <= 5; i++) {
+          const y = this.pos.y + (this.height * i / 5);
+          const x = this.pos.x + this.width/2 + (Math.random() - 0.5) * 10;
+          ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    class WorkflowBlastProjectile extends Projectile {
+      constructor(x, y, direction, owner) {
+        super(x, y, 100, 60, direction, owner);
+        this.damage = CONFIG.SPECIALS.workflow_blast.damage * owner.stats.attack;
+        this.range = CONFIG.SPECIALS.workflow_blast.range;
+        this.pushback = CONFIG.SPECIALS.workflow_blast.pushback;
+        this.startX = x;
+        this.hitPlayers = new Set();
+      }
+
+      update(dt, game) {
+        this.pos.x += this.facing * 15;
+        this.pos.y -= this.height / 2;
+
+        if (Math.abs(this.pos.x - this.startX) > this.range) {
+          this.active = false;
+        }
+      }
+
+      onHit(target, game) {
+        if (this.hitPlayers.has(target)) return;
+        this.hitPlayers.add(target);
+
+        const knockback = new Vector2(this.facing * this.pushback, -3);
+        target.takeDamage(this.damage, knockback);
+        // Don't deactivate - can hit multiple times
+      }
+
+      render(ctx) {
+        ctx.shadowBlur = 30;
+        ctx.shadowColor = '#ff6b35';
+        ctx.fillStyle = 'rgba(255, 107, 53, 0.6)';
+        ctx.fillRect(this.pos.x, this.pos.y, this.width, this.height);
+        ctx.strokeStyle = '#ff8844';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(this.pos.x, this.pos.y, this.width, this.height);
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // === SPECIAL ABILITIES ===
+    class Drone extends Entity {
+      constructor(x, y, owner) {
+        super(x, y, 20, 20);
+        this.owner = owner;
+        this.damage = CONFIG.SPECIALS.automation_drone.damage * owner.stats.attack;
+        this.duration = CONFIG.SPECIALS.automation_drone.duration;
+        this.fireRate = CONFIG.SPECIALS.automation_drone.fireRate;
+        this.spawnTime = performance.now();
+        this.lastFireTime = 0;
+        this.target = null;
+      }
+
+      update(dt, game) {
+        if (performance.now() - this.spawnTime > this.duration) {
+          this.active = false;
+          return;
+        }
+
+        // Find target
+        const enemy = game.getOpponent(this.owner);
+        if (enemy && enemy.active) {
+          this.target = enemy.getCenter();
+
+          // Move toward target (hover above)
+          const idealPos = new Vector2(enemy.pos.x, enemy.pos.y - 60);
+          const toIdeal = idealPos.subtract(this.pos);
+          this.vel = toIdeal.multiply(0.05);
+
+          // Fire
+          if (performance.now() - this.lastFireTime > this.fireRate) {
+            this.lastFireTime = performance.now();
+            const dir = enemy.getCenter().subtract(this.getCenter()).normalize();
+            game.addProjectile(new BlasterProjectile(
+              this.pos.x + this.width/2,
+              this.pos.y + this.height,
+              dir,
+              this.owner
+            ));
+          }
+        }
+
+        super.update(dt);
+      }
+
+      render(ctx) {
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#ff6b35';
+        ctx.fillStyle = '#ff6b35';
+        ctx.fillRect(this.pos.x, this.pos.y, this.width, this.height);
+
+        // Propeller effect
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(this.pos.x + 5, this.pos.y - 5, 10, 3);
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // === EFFECTS ===
+    class ExplosionEffect {
+      constructor(x, y, radius) {
+        this.x = x;
+        this.y = y;
+        this.maxRadius = radius;
+        this.radius = 0;
+        this.alpha = 1;
+        this.active = true;
+      }
+
+      update(dt) {
+        this.radius += 8;
+        this.alpha -= 0.05;
+        if (this.alpha <= 0) this.active = false;
+      }
+
+      render(ctx) {
+        ctx.globalAlpha = this.alpha;
+        ctx.shadowBlur = 30;
+        ctx.shadowColor = '#ff6600';
+        ctx.strokeStyle = '#ffaa00';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // === AI CONTROLLER ===
+    class AIController {
+      constructor(difficulty = 'normal') {
+        this.difficulty = difficulty;
+        this.reactionTime = { easy: 500, normal: 200, hard: 50 }[difficulty];
+        this.accuracy = { easy: 0.3, normal: 0.6, hard: 0.9 }[difficulty];
+        this.usesSpecials = { easy: 0.1, normal: 0.4, hard: 0.8 }[difficulty];
+        this.lastDecisionTime = 0;
+        this.currentAction = null;
+        this.targetPos = null;
+      }
+
+      update(player, enemy, game, input) {
+        const now = performance.now();
+
+        // Reaction time delay
+        if (now - this.lastDecisionTime < this.reactionTime) {
+          this.executeAction(player, enemy, game, input);
+          return;
+        }
+
+        this.lastDecisionTime = now;
+        this.decideAction(player, enemy, game);
+        this.executeAction(player, enemy, game, input);
+      }
+
+      decideAction(player, enemy, game) {
+        if (!enemy || !enemy.active) {
+          this.currentAction = 'idle';
+          return;
+        }
+
+        const dist = Vector2.distance(player.getCenter(), enemy.getCenter());
+        const healthPercent = player.health / player.maxHealth;
+        const rand = Math.random();
+
+        // Decision tree based on distance and health
+        if (healthPercent < 0.3 && rand < 0.5) {
+          this.currentAction = 'retreat';
+        } else if (dist < 150) {
+          this.currentAction = rand < 0.3 ? 'melee' : 'kite';
+        } else if (dist < 400) {
+          this.currentAction = 'attack';
+        } else {
+          this.currentAction = 'approach';
+        }
+
+        // Use specials occasionally
+        if (rand < this.usesSpecials) {
+          if (player.specialCooldowns.special1 <= 0 && rand < 0.5) {
+            this.currentAction = 'special1';
+          } else if (player.specialCooldowns.special2 <= 0) {
+            this.currentAction = 'special2';
+          }
+        }
+      }
+
+      executeAction(player, enemy, game, input) {
+        // Simulate input for AI
+        const aiInput = {
+          movement: new Vector2(0, 0),
+          weapon1: false,
+          weapon2: false,
+          weapon3: false,
+          special1: false,
+          special2: false
+        };
+
+        if (!enemy || !enemy.active) {
+          player.vel = new Vector2(0, 0);
+          return;
+        }
+
+        const toEnemy = enemy.getCenter().subtract(player.getCenter());
+        const dist = toEnemy.magnitude();
+
+        switch (this.currentAction) {
+          case 'approach':
+            aiInput.movement = toEnemy.normalize();
+            break;
+
+          case 'retreat':
+            aiInput.movement = toEnemy.normalize().multiply(-1);
+            break;
+
+          case 'kite':
+            // Move perpendicular while attacking
+            aiInput.movement = new Vector2(-toEnemy.y, toEnemy.x).normalize();
+            aiInput.weapon1 = Math.random() < this.accuracy;
+            break;
+
+          case 'attack':
+            aiInput.weapon1 = Math.random() < this.accuracy;
+            aiInput.weapon2 = Math.random() < 0.1 && dist > 200;
+            break;
+
+          case 'melee':
+            aiInput.weapon1 = true;
+            aiInput.weapon3 = Math.random() < 0.3 && player.weaponCooldowns.dash <= 0;
+            break;
+
+          case 'special1':
+            aiInput.special1 = true;
+            break;
+
+          case 'special2':
+            aiInput.special2 = true;
+            break;
+
+          case 'idle':
+          default:
+            break;
+        }
+
+        // Apply movement
+        if (aiInput.movement.magnitude() > 0) {
+          player.vel = aiInput.movement.multiply(player.stats.speed);
+          player.facing = aiInput.movement.x !== 0 ? Math.sign(aiInput.movement.x) : player.facing;
+        }
+
+        // Apply actions
+        if (aiInput.weapon1) player.fireBlaster(game);
+        if (aiInput.weapon2) player.throwGrenade(game);
+        if (aiInput.weapon3) {
+          player.dashDirection = aiInput.movement.magnitude() > 0 ? aiInput.movement : new Vector2(player.facing, 0);
+          player.dash({
+            getMovement: () => player.dashDirection
+          }, game);
+        }
+        if (aiInput.special1) player.useSpecial1(game);
+        if (aiInput.special2) player.useSpecial2(game);
+      }
+    }
+
+    // === GAME MANAGER ===
+    class Game {
+      constructor(canvas) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.state = GameState.MENU;
+
+        this.input = new InputHandler();
+
+        this.player1 = null;
+        this.player2 = null;
+        this.aiController = null;
+        this.isMultiplayer = false;
+        this.aiDifficulty = 'normal';
+
+        this.selectedArena = 'cloud_city';
+        this.projectiles = [];
+        this.entities = [];
+        this.effects = [];
+
+        this.roundTime = CONFIG.ROUND_TIME;
+        this.roundStartTime = 0;
+        this.matchWins = { p1: 0, p2: 0 };
+
+        // Accumulator for fixed timestep
+        this.accumulator = 0;
+        this.lastTime = 0;
+
+        // Screen shake
+        this.shakeIntensity = 0;
+        this.shakeDuration = 0;
+      }
+
+      startGame(player1Char, player2Char, isMultiplayer, difficulty = 'normal') {
+        this.isMultiplayer = isMultiplayer;
+        this.aiDifficulty = difficulty;
+
+        this.player1 = new Player(player1Char, 1, 100, CONFIG.CANVAS_HEIGHT / 2 - 30);
+        this.player2 = new Player(player2Char, 2, CONFIG.CANVAS_WIDTH - 140, CONFIG.CANVAS_HEIGHT / 2 - 30);
+
+        if (!isMultiplayer) {
+          this.aiController = new AIController(difficulty);
+        }
+
+        this.matchWins = { p1: 0, p2: 0 };
+        this.startRound();
+
+        this.state = GameState.PLAYING;
+      }
+
+      startRound() {
+        this.player1.reset(100, CONFIG.CANVAS_HEIGHT / 2 - 30);
+        this.player2.reset(CONFIG.CANVAS_WIDTH - 140, CONFIG.CANVAS_HEIGHT / 2 - 30);
+
+        this.projectiles = [];
+        this.entities = [];
+        this.effects = [];
+
+        this.roundTime = CONFIG.ROUND_TIME;
+        this.roundStartTime = performance.now();
+      }
+
+      update(dt) {
+        if (this.state !== GameState.PLAYING) return;
+
+        // Update round timer
+        this.roundTime = Math.max(0, CONFIG.ROUND_TIME - (performance.now() - this.roundStartTime));
+
+        // Update players
+        this.player1.update(dt, this.input, this);
+        if (this.isMultiplayer) {
+          this.player2.update(dt, this.input, this);
+          this.player2.handleInput(this.input, this);
+        } else {
+          this.aiController.update(this.player2, this.player1, this, this.input);
+        }
+        this.player1.handleInput(this.input, this);
+
+        // Update projectiles
+        for (let proj of this.projectiles) {
+          if (!proj.active) continue;
+          proj.update(dt, this);
+
+          // Check collision with players
+          for (let player of [this.player1, this.player2]) {
+            if (proj.owner === player || !player.active) continue;
+            if (proj.collidesWith(player)) {
+              proj.onHit(player, this);
+            }
+          }
+        }
+
+        // Update entities (drones, etc)
+        for (let entity of this.entities) {
+          if (entity.active) entity.update(dt, this);
+        }
+
+        // Update effects
+        for (let effect of this.effects) {
+          if (effect.active) effect.update(dt);
+        }
+
+        // Clean up inactive
+        this.projectiles = this.projectiles.filter(p => p.active);
+        this.entities = this.entities.filter(e => e.active);
+        this.effects = this.effects.filter(e => e.active);
+
+        // Update screen shake
+        if (this.shakeDuration > 0) {
+          this.shakeDuration -= dt;
+        }
+
+        // Check round end
+        this.checkRoundEnd();
+      }
+
+      checkRoundEnd() {
+        const p1Dead = !this.player1.active || this.player1.health <= 0;
+        const p2Dead = !this.player2.active || this.player2.health <= 0;
+        const timeUp = this.roundTime <= 0;
+
+        if (p1Dead || p2Dead || timeUp) {
+          // Determine winner
+          let winner = null;
+          if (p1Dead && !p2Dead) winner = 'p2';
+          else if (p2Dead && !p1Dead) winner = 'p1';
+          else if (timeUp) {
+            // Most health wins
+            winner = this.player1.health > this.player2.health ? 'p1' :
+                     this.player2.health > this.player1.health ? 'p2' : null;
+          }
+
+          if (winner) {
+            this.matchWins[winner]++;
+            if (this.matchWins[winner] >= CONFIG.WINS_NEEDED) {
+              this.state = GameState.GAME_OVER;
+            } else {
+              this.state = GameState.ROUND_END;
+              // Auto-start next round after delay
+              setTimeout(() => {
+                if (this.state === GameState.ROUND_END) {
+                  this.startRound();
+                  this.state = GameState.PLAYING;
+                }
+              }, 2000);
+            }
+          }
+        }
+      }
+
+      render() {
+        const ctx = this.ctx;
+
+        // Apply screen shake
+        ctx.save();
+        if (this.shakeDuration > 0) {
+          const shakeX = (Math.random() - 0.5) * this.shakeIntensity;
+          const shakeY = (Math.random() - 0.5) * this.shakeIntensity;
+          ctx.translate(shakeX, shakeY);
+        }
+
+        // Clear with arena background
+        const arena = CONFIG.ARENAS[this.selectedArena];
+        ctx.fillStyle = arena.bgColor;
+        ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+        // Draw grid
+        ctx.strokeStyle = arena.accentColor + '22';
+        ctx.lineWidth = 1;
+        for (let x = 0; x < CONFIG.CANVAS_WIDTH; x += 50) {
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, CONFIG.CANVAS_HEIGHT);
+          ctx.stroke();
+        }
+        for (let y = 0; y < CONFIG.CANVAS_HEIGHT; y += 50) {
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(CONFIG.CANVAS_WIDTH, y);
+          ctx.stroke();
+        }
+
+        // Render entities
+        for (let entity of this.entities) {
+          entity.render(ctx);
+        }
+
+        // Render projectiles
+        for (let proj of this.projectiles) {
+          proj.render(ctx);
+        }
+
+        // Render players
+        if (this.player1) this.player1.render(ctx);
+        if (this.player2) this.player2.render(ctx);
+
+        // Render effects
+        for (let effect of this.effects) {
+          effect.render(ctx);
+        }
+
+        // Render HUD (basic - GEMINI will style)
+        this.renderHUD(ctx);
+
+        ctx.restore();
+      }
+
+      renderHUD(ctx) {
+        if (this.state !== GameState.PLAYING && this.state !== GameState.ROUND_END) return;
+
+        // Health bars
+        const barWidth = 200;
+        const barHeight = 20;
+        const barY = 20;
+
+        // P1 health (left)
+        ctx.fillStyle = '#333';
+        ctx.fillRect(20, barY, barWidth, barHeight);
+        const p1HealthPercent = this.player1.health / this.player1.maxHealth;
+        ctx.fillStyle = p1HealthPercent > 0.5 ? '#00ff88' : p1HealthPercent > 0.25 ? '#ffff00' : '#ff4444';
+        ctx.fillRect(20, barY, barWidth * p1HealthPercent, barHeight);
+        ctx.strokeStyle = this.player1.stats.color;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(20, barY, barWidth, barHeight);
+
+        // P1 name
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '14px sans-serif';
+        ctx.fillText(this.player1.stats.name, 20, barY - 5);
+
+        // P2 health (right)
+        ctx.fillStyle = '#333';
+        ctx.fillRect(CONFIG.CANVAS_WIDTH - barWidth - 20, barY, barWidth, barHeight);
+        const p2HealthPercent = this.player2.health / this.player2.maxHealth;
+        ctx.fillStyle = p2HealthPercent > 0.5 ? '#00ff88' : p2HealthPercent > 0.25 ? '#ffff00' : '#ff4444';
+        ctx.fillRect(CONFIG.CANVAS_WIDTH - barWidth - 20 + barWidth * (1 - p2HealthPercent), barY, barWidth * p2HealthPercent, barHeight);
+        ctx.strokeStyle = this.player2.stats.color;
+        ctx.strokeRect(CONFIG.CANVAS_WIDTH - barWidth - 20, barY, barWidth, barHeight);
+
+        // P2 name
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'right';
+        ctx.fillText(this.player2.stats.name, CONFIG.CANVAS_WIDTH - 20, barY - 5);
+        ctx.textAlign = 'left';
+
+        // Timer
+        const seconds = Math.ceil(this.roundTime / 1000);
+        ctx.fillStyle = seconds <= 10 ? '#ff4444' : '#ffffff';
+        ctx.font = 'bold 32px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(seconds.toString(), CONFIG.CANVAS_WIDTH / 2, 45);
+        ctx.textAlign = 'left';
+
+        // Wins
+        ctx.font = '24px sans-serif';
+        ctx.fillStyle = this.player1.stats.color;
+        ctx.fillText(this.matchWins.p1.toString(), CONFIG.CANVAS_WIDTH / 2 - 40, 75);
+        ctx.fillStyle = this.player2.stats.color;
+        ctx.textAlign = 'right';
+        ctx.fillText(this.matchWins.p2.toString(), CONFIG.CANVAS_WIDTH / 2 + 40, 75);
+        ctx.textAlign = 'left';
+
+        // Round end / game over message
+        if (this.state === GameState.ROUND_END || this.state === GameState.GAME_OVER) {
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+          ctx.fillRect(0, CONFIG.CANVAS_HEIGHT / 2 - 50, CONFIG.CANVAS_WIDTH, 100);
+
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 36px sans-serif';
+          ctx.textAlign = 'center';
+
+          if (this.state === GameState.GAME_OVER) {
+            const winner = this.matchWins.p1 >= CONFIG.WINS_NEEDED ? this.player1 : this.player2;
+            ctx.fillStyle = winner.stats.glowColor;
+            ctx.fillText(`${winner.stats.name} WINS!`, CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2);
+          } else {
+            ctx.fillText('ROUND!', CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2);
+          }
+          ctx.textAlign = 'left';
+        }
+      }
+
+      addProjectile(proj) {
+        this.projectiles.push(proj);
+      }
+
+      addEntity(entity) {
+        this.entities.push(entity);
+      }
+
+      addEffect(effect) {
+        this.effects.push(effect);
+        if (effect instanceof ExplosionEffect) {
+          this.shakeIntensity = 10;
+          this.shakeDuration = 200;
+        }
+      }
+
+      getPlayers() {
+        return [this.player1, this.player2].filter(p => p);
+      }
+
+      getOpponent(player) {
+        return player === this.player1 ? this.player2 : this.player1;
+      }
+    }
+
+    // === GAME LOOP ===
+    function initGame() {
+      const canvas = document.getElementById('game-canvas');
+      const game = new Game(canvas);
+
+      // TEMP: Auto-start a game for testing
+      // GEMINI will connect menus to this
+      game.startGame('benioff', 'mcdermott', false, 'normal');
+
+      let lastTime = 0;
+      let accumulator = 0;
+
+      function gameLoop(timestamp) {
+        const deltaTime = Math.min(timestamp - lastTime, CONFIG.MAX_DELTA);
+        lastTime = timestamp;
+        accumulator += deltaTime;
+
+        while (accumulator >= CONFIG.FIXED_TIMESTEP) {
+          game.update(CONFIG.FIXED_TIMESTEP);
+          accumulator -= CONFIG.FIXED_TIMESTEP;
+        }
+
+        game.render();
+        game.input.clearFrame();
+
+        requestAnimationFrame(gameLoop);
+      }
+
+      requestAnimationFrame(gameLoop);
+
+      // Expose game globally for menu integration
+      window.game = game;
+    }
+
+    // Start when DOM is ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initGame);
+    } else {
+      initGame();
+    }
+
+  </script>
+</body>
+</html>
